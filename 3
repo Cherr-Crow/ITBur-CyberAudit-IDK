@@ -1,0 +1,798 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🛡️ Автоматический аудитор безопасности Linux
+Версия: 3.2.1 (Исправлена кодировка PDF)
+"""
+
+import os
+import re
+import socket
+import subprocess
+import platform
+import sys
+from datetime import datetime
+from collections import OrderedDict
+
+# ═══════════════════════════════════════════════════════════════
+# 🎨 ЦВЕТА
+# ═══════════════════════════════════════════════════════════════
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+
+    GOOD = f'{BOLD}{GREEN}'
+    WARNING = f'{BOLD}{YELLOW}'
+    DANGER = f'{BOLD}{RED}'
+    INFO = f'{BOLD}{CYAN}'
+    HEADER = f'{BOLD}{CYAN}'
+
+# ═══════════════════════════════════════════════════════════════
+# 📊 СТАТИСТИКА
+# ═══════════════════════════════════════════════════════════════
+class AuditStats:
+    def __init__(self):
+        self.start_time = datetime.now()
+        self.categories = {
+            'system': {'p': 0, 'w': 0, 'c': 0, 't': 0},
+            'files': {'p': 0, 'w': 0, 'c': 0, 't': 0},
+            'network': {'p': 0, 'w': 0, 'c': 0, 't': 0},
+            'users': {'p': 0, 'w': 0, 'c': 0, 't': 0},
+            'services': {'p': 0, 'w': 0, 'c': 0, 't': 0},
+            'hardening': {'p': 0, 'w': 0, 'c': 0, 't': 0},
+        }
+        self.findings = []
+
+    def add(self, cat, status, msg, simple_msg=None, details=None, fix=None, simple_fix=None):
+        if cat not in self.categories:
+            cat = 'system'
+        self.categories[cat]['t'] += 1
+        if status == 'good':
+            self.categories[cat]['p'] += 1
+        elif status == 'warning':
+            self.categories[cat]['w'] += 1
+        elif status == 'critical':
+            self.categories[cat]['c'] += 1
+        self.findings.append({
+            'cat': cat,
+            'status': status,
+            'msg': msg,
+            'simple_msg': simple_msg or msg,
+            'details': details,
+            'fix': fix,
+            'simple_fix': simple_fix or fix
+        })
+
+    def score(self):
+        t = sum(c['t'] for c in self.categories.values())
+        if t == 0:
+            return 100
+        p = sum(c['p'] for c in self.categories.values())
+        w = sum(c['w'] for c in self.categories.values())
+        c = sum(c['c'] for c in self.categories.values())
+        return max(0, min(100, round((p * 10 + w * 5) / t - c * 15)))
+
+    def summary(self):
+        return {
+            'dur': (datetime.now() - self.start_time).total_seconds(),
+            'total': sum(c['t'] for c in self.categories.values()),
+            'passed': sum(c['p'] for c in self.categories.values()),
+            'warn': sum(c['w'] for c in self.categories.values()),
+            'crit': sum(c['c'] for c in self.categories.values()),
+            'score': self.score()
+        }
+
+stats = AuditStats()
+
+# ═══════════════════════════════════════════════════════════════
+# ⚙️ КОНФИГУРАЦИЯ
+# ═══════════════════════════════════════════════════════════════
+CONFIG = {
+    'critical_files': OrderedDict([
+        ('/etc/passwd', ('644', 'Список пользователей')),
+        ('/etc/shadow', ('600', 'Пароли пользователей')),
+        ('/etc/group', ('644', 'Группы пользователей')),
+        ('/etc/sudoers', ('440', 'Настройки администратора')),
+        ('/etc/ssh/sshd_config', ('600', 'Настройки подключения')),
+        ('/etc/crontab', ('600', 'Расписание задач')),
+    ]),
+    'suspicious_ports': OrderedDict([
+        (21, ('FTP', 'critical', 'Передача без шифрования')),
+        (22, ('SSH', 'info', 'Безопасное подключение')),
+        (23, ('Telnet', 'critical', 'Пароли видны всем')),
+        (80, ('HTTP', 'warning', 'Сайт без защиты')),
+        (443, ('HTTPS', 'good', 'Сайт с защитой')),
+        (3306, ('MySQL', 'warning', 'База данных')),
+        (6379, ('Redis', 'critical', 'Часто без пароля')),
+    ]),
+    'suspicious_packages': [
+        'telnet', 'netcat', 'nmap', 'tcpdump', 'john', 'hashcat'
+    ],
+    'kernel_params': [
+        ('net.ipv4.ip_forward', '0', 'Пересылка пакетов'),
+        ('kernel.randomize_va_space', '2', 'Защита памяти'),
+        ('kernel.dmesg_restrict', '1', 'Скрытие информации о ядре'),
+    ],
+    'export_pdf': 'security_report.pdf',
+    'export_txt': 'security_report.txt'
+}
+
+# ═══════════════════════════════════════════════════════════════
+# 🖨️ ВЫВОД В ТЕРМИНАЛ
+# ═══════════════════════════════════════════════════════════════
+def print_banner():
+    os.system('clear' if platform.system() != 'Windows' else 'cls')
+    print(f"""
+{Colors.HEADER}╔══════════════════════════════════════════════════════════════════╗{Colors.RESET}
+{Colors.HEADER}║{Colors.RESET}  {Colors.BOLD}{Colors.WHITE}🛡️  ПРОВЕРКА БЕЗОПАСНОСТИ LINUX  🛡️{Colors.RESET}                {Colors.HEADER}║{Colors.RESET}
+{Colors.HEADER}║{Colors.RESET}  {Colors.DIM}Версия: 3.2.1 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}            {Colors.HEADER}║{Colors.RESET}
+{Colors.HEADER}╚══════════════════════════════════════════════════════════════════╝{Colors.RESET}
+""")
+
+def print_section(title, icon='📋'):
+    print(f"\n{Colors.INFO}{icon} {title}{Colors.RESET}")
+    print(f"{Colors.DIM}{'─' * 80}{Colors.RESET}")
+
+def print_status(status, message):
+    icons = {
+        'good': f'{Colors.GOOD}✓{Colors.RESET}',
+        'warning': f'{Colors.WARNING}⚠{Colors.RESET}',
+        'critical': f'{Colors.DANGER}✗{Colors.RESET}',
+        'info': f'{Colors.INFO}ℹ{Colors.RESET}'
+    }
+    icon = icons.get(status, '•')
+    print(f"  {icon} {message}")
+
+# ═══════════════════════════════════════════════════════════════
+# 📄 ГЕНЕРАЦИЯ PDF ОТЧЁТА (✅ ИСПРАВЛЕНА КОДИРОВКА)
+# ═══════════════════════════════════════════════════════════════
+def generate_pdf_report(filename):
+    """✅ Создаёт PDF с поддержкой кириллицы"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.lib.fonts import addMapping
+
+        # ✅ РЕГИСТРАЦИЯ ШРИФТА С КИРИЛЛИЦЕЙ
+        # Пытаемся найти шрифт с поддержкой кириллицы
+        font_registered = False
+
+        # Список возможных путей к шрифтам
+        font_paths = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/TTF/DejaVuSans.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            '/usr/share/fonts/liberation/LiberationSans-Regular.ttf',
+            'C:\\Windows\\Fonts\\arial.ttf',
+            '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
+        ]
+
+        # Пробуем зарегистрировать шрифт
+        for font_path in font_paths:
+            if os.path.exists(font_path):
+                try:
+                    pdfmetrics.registerFont(TTFont('CyrillicFont', font_path))
+                    font_registered = True
+                    print(f"{Colors.GOOD}✓ Шрифт загружен: {font_path}{Colors.RESET}")
+                    break
+                except:
+                    continue
+
+        # Если шрифт не найден, используем стандартный (но кириллица не будет работать)
+        if not font_registered:
+            print(f"{Colors.WARNING}⚠ Шрифт с кириллицей не найден. PDF будет с иероглифами.{Colors.RESET}")
+            print(f"   Установите шрифты: sudo apt install fonts-dejavu")
+            # Создаём упрощённый PDF без кириллицы
+            return generate_simple_pdf(filename)
+
+        # Создаём стили с кириллическим шрифтом
+        doc = SimpleDocTemplate(filename, pagesize=A4,
+                               rightMargin=0.5*inch, leftMargin=0.5*inch,
+                               topMargin=0.5*inch, bottomMargin=0.5*inch)
+
+        styles = getSampleStyleSheet()
+
+        # Кастомные стили с кириллическим шрифтом
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Normal'],
+            fontName='CyrillicFont',
+            fontSize=18,
+            textColor=colors.darkblue,
+            spaceAfter=12,
+            alignment=TA_CENTER,
+            leading=22
+        )
+
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Normal'],
+            fontName='CyrillicFont',
+            fontSize=14,
+            textColor=colors.darkblue,
+            spaceAfter=6,
+            spaceBefore=12,
+            leading=18
+        )
+
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontName='CyrillicFont',
+            fontSize=11,
+            textColor=colors.black,
+            spaceAfter=6,
+            leading=14
+        )
+
+        warning_style = ParagraphStyle(
+            'Warning',
+            parent=styles['Normal'],
+            fontName='CyrillicFont',
+            fontSize=11,
+            textColor=colors.orange,
+            spaceAfter=6,
+            leading=14
+        )
+
+        critical_style = ParagraphStyle(
+            'Critical',
+            parent=styles['Normal'],
+            fontName='CyrillicFont',
+            fontSize=11,
+            textColor=colors.red,
+            spaceAfter=6,
+            leading=14
+        )
+
+        success_style = ParagraphStyle(
+            'Success',
+            parent=styles['Normal'],
+            fontName='CyrillicFont',
+            fontSize=11,
+            textColor=colors.green,
+            spaceAfter=6,
+            leading=14
+        )
+
+        story = []
+        s = stats.summary()
+
+        # Заголовок
+        story.append(Paragraph("ОТЧЁТ О БЕЗОПАСНОСТИ КОМПЬЮТЕРА", title_style))
+        story.append(Paragraph(f"Дата проверки: {datetime.now().strftime('%d.%m.%Y в %H:%M')}", normal_style))
+        story.append(Paragraph(f"Компьютер: {socket.gethostname()}", normal_style))
+        story.append(Paragraph(f"OS: {platform.system()} {platform.release()}", normal_style))
+        story.append(Spacer(1, 0.3*inch))
+
+        # Оценка
+        grade = 'A' if s['score'] >= 90 else 'B' if s['score'] >= 75 else 'C' if s['score'] >= 60 else 'D' if s['score'] >= 40 else 'F'
+
+        story.append(Paragraph(f"ОБЩАЯ ОЦЕНКА: {grade} ({s['score']} из 100)", heading_style))
+
+        if s['score'] >= 80:
+            explanation = "Хорошо! Ваш компьютер хорошо защищён."
+        elif s['score'] >= 60:
+            explanation = "Нормально. Есть несколько моментов для улучшения."
+        else:
+            explanation = "Внимание! Обнаружены серьёзные проблемы."
+
+        story.append(Paragraph(explanation, normal_style))
+        story.append(Spacer(1, 0.2*inch))
+
+        # Статистика
+        stat_data = [
+            ['Всё в порядке', str(s['passed'])],
+            ['Требует внимания', str(s['warn'])],
+            ['Критические проблемы', str(s['crit'])],
+            ['Всего проверок', str(s['total'])],
+            ['Время проверки', f"{s['dur']:.1f} sek"]
+        ]
+
+        stat_table = Table(stat_data, colWidths=[3*inch, 1*inch])
+        stat_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.lightgrey),
+            ('BACKGROUND', (0, 0), (0, -1), colors.whitesmoke),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, -1), 'CyrillicFont'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey)
+        ]))
+        story.append(stat_table)
+        story.append(Spacer(1, 0.3*inch))
+
+        # Критические проблемы
+        critical_findings = [f for f in stats.findings if f['status'] == 'critical']
+        if critical_findings:
+            story.append(Paragraph("СНАЧАЛА ИСПРАВИТЬ ЭТО", heading_style))
+
+            for i, finding in enumerate(critical_findings[:10], 1):
+                story.append(Paragraph(f"<b>{i}. {finding['simple_msg']}</b>", critical_style))
+                if finding['simple_fix']:
+                    story.append(Paragraph(f"   Как исправить: {finding['simple_fix']}", normal_style))
+                story.append(Spacer(1, 0.1*inch))
+
+        # Предупреждения
+        warning_findings = [f for f in stats.findings if f['status'] == 'warning']
+        if warning_findings:
+            story.append(Paragraph("ЖЕЛАТЕЛЬНО ИСПРАВИТЬ", heading_style))
+
+            for i, finding in enumerate(warning_findings[:15], 1):
+                story.append(Paragraph(f"<b>{i}. {finding['simple_msg']}</b>", warning_style))
+                if finding['simple_fix']:
+                    story.append(Paragraph(f"   Как исправить: {finding['simple_fix']}", normal_style))
+                story.append(Spacer(1, 0.1*inch))
+
+        # Успешные проверки
+        good_findings = [f for f in stats.findings if f['status'] == 'good']
+        if good_findings:
+            story.append(Paragraph("ВСЁ ХОРОШО", heading_style))
+
+            good_table_data = [['Что затронуто', 'Результат']]
+            for finding in good_findings[:20]:
+                good_table_data.append([finding['simple_msg'], 'OK'])
+
+            good_table = Table(good_table_data, colWidths=[3.5*inch, 1*inch])
+            good_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgreen),
+                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, -1), 'CyrillicFont'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey)
+            ]))
+            story.append(good_table)
+
+        doc.build(story)
+        print(f"\n{Colors.GOOD}✓ PDF-отчёт сохранён: {filename}{Colors.RESET}")
+        return True
+
+    except ImportError:
+        print(f"\n{Colors.WARNING}⚠ Библиотека reportlab не установлена.{Colors.RESET}")
+        print(f"   Установите: pip install reportlab")
+        return False
+    except Exception as e:
+        print(f"\n{Colors.DANGER}✗ Ошибка создания PDF: {e}{Colors.RESET}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def generate_simple_pdf(filename):
+    """Упрощённый PDF без кириллицы (транслит)"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import inch
+
+        doc = SimpleDocTemplate(filename, pagesize=A4)
+        styles = getSampleStyleSheet()
+        story = []
+        s = stats.summary()
+
+        story.append(Paragraph("<b>LINUX SECURITY AUDIT REPORT</b>", styles['Heading1']))
+        story.append(Paragraph(f"Date: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles['Normal']))
+        story.append(Paragraph(f"Host: {socket.gethostname()}", styles['Normal']))
+        story.append(Paragraph(f"OS: {platform.system()} {platform.release()}", styles['Normal']))
+        story.append(Spacer(1, 20))
+
+        grade = 'A' if s['score'] >= 90 else 'B' if s['score'] >= 75 else 'C' if s['score'] >= 60 else 'D'
+        story.append(Paragraph(f"<b>SCORE: {grade} ({s['score']}/100)</b>", styles['Heading2']))
+
+        stat_data = [
+            ['Passed', str(s['passed'])],
+            ['Warnings', str(s['warn'])],
+            ['Critical', str(s['crit'])],
+            ['Total', str(s['total'])]
+        ]
+        table = Table(stat_data)
+        table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey)
+        ]))
+        story.append(table)
+
+        doc.build(story)
+        print(f"{Colors.GOOD}✓ Uproshchyonnyy PDF sokhranyon: {filename}{Colors.RESET}")
+        return True
+    except:
+        return False
+
+# ═══════════════════════════════════════════════════════════════
+# 📄 TXT ОТЧЁТ
+# ═══════════════════════════════════════════════════════════════
+def generate_txt_report(filename):
+    """✅ Создаёт TXT-отчёт с кириллицей"""
+    try:
+        s = stats.summary()
+        grade = 'A' if s['score'] >= 90 else 'B' if s['score'] >= 75 else 'C' if s['score'] >= 60 else 'D' if s['score'] >= 40 else 'F'
+
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\n")
+            f.write("🛡️ ОТЧЁТ О БЕЗОПАСНОСТИ КОМПЬЮТЕРА\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Дата проверки: {datetime.now().strftime('%d.%m.%Y в %H:%M')}\n")
+            f.write(f"Компьютер: {socket.gethostname()}\n")
+            f.write(f"ОС: {platform.system()} {platform.release()}\n\n")
+
+            f.write("-" * 80 + "\n")
+            f.write(f"ОБЩАЯ ОЦЕНКА: {grade} ({s['score']} из 100)\n")
+            f.write("-" * 80 + "\n\n")
+
+            if s['score'] >= 80:
+                f.write("✅ ХОРОШО! Ваш компьютер хорошо защищён.\n\n")
+            elif s['score'] >= 60:
+                f.write("⚠ НОРМАЛЬНО. Есть несколько моментов для улучшения.\n\n")
+            else:
+                f.write("🔴 ВНИМАНИЕ! Обнаружены серьёзные проблемы.\n\n")
+
+            f.write("СТАТИСТИКА:\n")
+            f.write(f"  ✅ Всё в порядке: {s['passed']}\n")
+            f.write(f"  ⚠ Требует внимания: {s['warn']}\n")
+            f.write(f"  🔴 Критические проблемы: {s['crit']}\n")
+            f.write(f"  Всего проверок: {s['total']}\n\n")
+
+            # Критические проблемы
+            critical_findings = [f for f in stats.findings if f['status'] == 'critical']
+            if critical_findings:
+                f.write("=" * 80 + "\n")
+                f.write("🔴 СНАЧАЛА ИСПРАВЬТЕ ЭТО\n")
+                f.write("=" * 80 + "\n\n")
+
+                for i, finding in enumerate(critical_findings, 1):
+                    f.write(f"{i}. {finding['simple_msg']}\n")
+                    if finding['simple_fix']:
+                        f.write(f"   Как исправить: {finding['simple_fix']}\n")
+                    f.write("\n")
+
+            # Предупреждения
+            warning_findings = [f for f in stats.findings if f['status'] == 'warning']
+            if warning_findings:
+                f.write("=" * 80 + "\n")
+                f.write("⚠ ЖЕЛАТЕЛЬНО ИСПРАВИТЬ\n")
+                f.write("=" * 80 + "\n\n")
+
+                for i, finding in enumerate(warning_findings, 1):
+                    f.write(f"{i}. {finding['simple_msg']}\n")
+                    if finding['simple_fix']:
+                        f.write(f"   Как исправить: {finding['simple_fix']}\n")
+                    f.write("\n")
+
+            # Успешные проверки
+            good_findings = [f for f in stats.findings if f['status'] == 'good']
+            if good_findings:
+                f.write("=" * 80 + "\n")
+                f.write("✅ ВСЁ ХОРОШО\n")
+                f.write("=" * 80 + "\n\n")
+
+                for finding in good_findings:
+                    f.write(f"  ✓ {finding['simple_msg']}\n")
+                f.write("\n")
+
+        print(f"{Colors.GOOD}✓ TXT-отчёт сохранён: {filename}{Colors.RESET}")
+        return True
+    except Exception as e:
+        print(f"{Colors.DANGER}✗ Ошибка создания TXT: {e}{Colors.RESET}")
+        return False
+
+# ═══════════════════════════════════════════════════════════════
+# 🔍 ПРОВЕРКИ (сокращённо для экономии места)
+# ═══════════════════════════════════════════════════════════════
+def check_system():
+    print_section("ПРОВЕРКА ОКРУЖЕНИЯ", "🖥️")
+
+    os_name = f"{platform.system()} {platform.release()}"
+    if platform.system() == 'Linux':
+        print_status('good', f'ОС: {os_name}')
+        stats.add('system', 'good', f'ОС: {os_name}',
+                 simple_msg='Операционная система: Linux')
+    else:
+        print_status('critical', f'ОС: {os_name} — только для Linux!')
+        stats.add('system', 'critical', f'Неподдерживаемая ОС',
+                 simple_msg='Эта программа работает только на Linux')
+        return False
+
+    if os.geteuid() == 0:
+        print_status('good', 'Права root: подтверждены ✓')
+        stats.add('system', 'good', 'Запуск с root',
+                 simple_msg='Программа запущена с правами администратора')
+    else:
+        print_status('warning', 'Запущено БЕЗ прав root')
+        stats.add('system', 'warning', 'Нет root-прав',
+                 simple_msg='Программа запущена без прав администратора',
+                 simple_fix='Запустите с командой: sudo python3 audit.py')
+    return True
+
+def file_audit():
+    print_section("ПРАВА ДОСТУПА К ФАЙЛАМ", "📁")
+    print(f"  {Colors.BOLD}{'Файл':<35} | {'Ожидаемо':<10} | {'Фактически':<12} | {'Статус':<15}{Colors.RESET}")
+    print(f"  {Colors.DIM}{'─' * 80}{Colors.RESET}")
+
+    for filepath, (target_mode, description) in CONFIG['critical_files'].items():
+        if os.path.exists(filepath):
+            try:
+                mode = oct(os.stat(filepath).st_mode)[-3:]
+                if mode == target_mode:
+                    status, status_txt = 'good', f'OK ({mode})'
+                else:
+                    is_crit = any(x in filepath for x in ['shadow', 'sudoers'])
+                    status = 'critical' if is_crit else 'warning'
+                    status_txt = f'УЯЗВИМО ({mode})'
+
+                color = Colors.DANGER if status == 'critical' else Colors.WARNING if status == 'warning' else Colors.GOOD
+                print(f"  {color}{filepath:<35} | {target_mode:<10} | {mode:<12} | {status_txt:<15}{Colors.RESET}")
+
+                simple_msgs = {
+                    '/etc/passwd': 'Файл с пользователями',
+                    '/etc/shadow': 'Файл с паролями',
+                    '/etc/group': 'Файл с группами',
+                    '/etc/sudoers': 'Настройки администратора',
+                    '/etc/ssh/sshd_config': 'Настройки подключения',
+                    '/etc/crontab': 'Расписание задач'
+                }
+                simple_msg = simple_msgs.get(filepath, filepath)
+
+                stats.add('files', status, f'{filepath}: {mode}',
+                         simple_msg=f'Права на {simple_msg}: {mode} (нужно {target_mode})' if status != 'good' else f'Права на {simple_msg} в порядке',
+                         fix='chmod ' + target_mode + ' ' + filepath if status != 'good' else None,
+                         simple_fix=f'Выполните: sudo chmod {target_mode} {filepath}' if status != 'good' else None)
+            except PermissionError:
+                print(f"  {Colors.WARNING}{filepath:<35} | {target_mode:<10} | {'НЕТ ДОСТУПА':<12} | {'ПРОВЕРЬТЕ':<15}{Colors.RESET}")
+                stats.add('files', 'warning', f'Нет доступа к {filepath}',
+                         simple_msg=f'Нет доступа к файлу {filepath}',
+                         simple_fix='Запустите программу с sudo')
+        else:
+            print(f"  {Colors.DIM}{filepath:<35} | {target_mode:<10} | {'—':<12} | {'НЕ НАЙДЕН':<15}{Colors.RESET}")
+            stats.add('files', 'info', f'Файл не найден: {filepath}',
+                     simple_msg=f'Файл {filepath} не найден')
+    print()
+
+def network_audit():
+    print_section("СЕТЕВОЙ АУДИТ", "🌐")
+    print(f"  {Colors.BOLD}{'Порт':<8} | {'Сервис':<12} | {'Статус':<10} | {'Риск':<10} | {'Рекомендация'}{Colors.RESET}")
+    print(f"  {Colors.DIM}{'─' * 80}{Colors.RESET}")
+
+    simple_names = {
+        'FTP': 'Передача файлов',
+        'SSH': 'Удалённое подключение',
+        'Telnet': 'Старое подключение',
+        'HTTP': 'Сайт без защиты',
+        'HTTPS': 'Сайт с защитой',
+        'MySQL': 'База данных',
+        'Redis': 'База данных Redis'
+    }
+
+    for port, (name, risk_level, description) in CONFIG['suspicious_ports'].items():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            result = s.connect_ex(('127.0.0.1', port))
+            s.close()
+
+            if result == 0:
+                status = 'ОТКРЫТ'
+                if risk_level == 'critical':
+                    color, rec, st = Colors.DANGER, 'Закрыть!', 'critical'
+                elif risk_level == 'warning':
+                    color, rec, st = Colors.WARNING, 'Проверить', 'warning'
+                else:
+                    color, rec, st = Colors.GOOD, 'OK', 'good'
+            else:
+                status, color, rec, st = 'ЗАКРЫТ', Colors.DIM, '—', 'good'
+
+            print(f"  {color}{port:<8} | {name:<12} | {status:<10} | {risk_level.upper():<10} | {rec}{Colors.RESET}")
+
+            simple_name = simple_names.get(name, name)
+            stats.add('network', st, f'Порт {port}/{name}: {status.lower()}',
+                     simple_msg=f'Порт {port} ({simple_name}): {status.lower()}' if status == 'ОТКРЫТ' else f'Порт {port} ({simple_name}) закрыт',
+                     details=description,
+                     fix=rec if rec != '—' else None,
+                     simple_fix=f'Закройте порт {port} в настройках фаервола' if rec == 'Закрыть!' else None)
+        except:
+            print(f"  {Colors.WARNING}{port:<8} | {name:<12} | {'ОШИБКА':<10} | {'—':<10} | {'—'}{Colors.RESET}")
+            stats.add('network', 'warning', f'Ошибка проверки порта {port}',
+                     simple_msg=f'Не удалось проверить порт {port}')
+
+    print(f"\n  {Colors.BOLD}Брандмауэр:{Colors.RESET}")
+    fw_found = False
+    for cmd, name in [(['iptables', '-L', '-n'], 'iptables'), (['ufw', 'status'], 'UFW')]:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and ('ACCEPT' in result.stdout or 'Status: active' in result.stdout):
+                print(f"  {Colors.GOOD}✓{Colors.RESET} {name}: активен")
+                stats.add('network', 'good', f'{name} активен',
+                         simple_msg='Брандмауэр включён')
+                fw_found = True
+                break
+        except:
+            pass
+    if not fw_found:
+        print(f"  {Colors.DANGER}✗{Colors.RESET} Брандмауэр не обнаружен")
+        stats.add('network', 'critical', 'Нет фаервола',
+                 simple_msg='Брандмауэр не включён',
+                 simple_fix='Выполните: sudo apt install ufw && sudo ufw enable')
+    print()
+
+def user_audit():
+    print_section("ПОЛЬЗОВАТЕЛИ", "👥")
+
+    zero_uid = []
+    with open('/etc/passwd') as f:
+        for line in f:
+            parts = line.strip().split(':')
+            if len(parts) >= 3 and parts[2] == '0' and parts[0] != 'root':
+                zero_uid.append(parts[0])
+
+    if zero_uid:
+        print(f"  {Colors.DANGER}✗ Пользователи с UID 0: {', '.join(zero_uid)}{Colors.RESET}")
+        stats.add('users', 'critical', f'UID 0: {", ".join(zero_uid)}',
+                 simple_msg=f'Есть пользователи с правами админа: {", ".join(zero_uid)}',
+                 simple_fix='Удалите лишних пользователей')
+    else:
+        print_status('good', 'Только root имеет UID 0')
+        stats.add('users', 'good', 'UID 0 только у root',
+                 simple_msg='Только главный администратор имеет полные права')
+
+    try:
+        result = subprocess.run(['awk', '-F:', '($2 == "" || $2 == "!") {print $1}', '/etc/shadow'],
+                               capture_output=True, text=True, timeout=5)
+        no_pass = [u for u in result.stdout.strip().split('\n') if u and u not in ['nobody', 'nologin']]
+        if no_pass:
+            print(f"  {Colors.DANGER}✗ Без пароля: {', '.join(no_pass)}{Colors.RESET}")
+            stats.add('users', 'critical', f'Без пароля: {", ".join(no_pass)}',
+                     simple_msg=f'У пользователей нет пароля: {", ".join(no_pass)}',
+                     simple_fix='Установите пароль: sudo passwd <имя>')
+        else:
+            print_status('good', 'Все пользователи имеют пароли')
+            stats.add('users', 'good', 'Пароли у всех пользователей',
+                     simple_msg='У всех пользователей есть пароли')
+    except:
+        stats.add('users', 'warning', 'Не удалось проверить пароли',
+                 simple_msg='Не удалось проверить наличие паролей')
+    print()
+
+def ssh_audit():
+    print_section("НАСТРОЙКИ SSH", "🔑")
+    ssh_cfg = '/etc/ssh/sshd_config'
+    if not os.path.exists(ssh_cfg):
+        print_status('warning', 'Настройки SSH не найдены')
+        stats.add('services', 'warning', 'Нет sshd_config',
+                 simple_msg='Настройки SSH не найдены')
+        return
+
+    try:
+        with open(ssh_cfg) as f:
+            content = f.read().lower()
+
+        checks = [
+            ('permitrootlogin', 'no', 'critical', 'Вход root'),
+            ('passwordauthentication', 'no', 'warning', 'Вход по паролю'),
+            ('permitemptypasswords', 'no', 'critical', 'Пустые пароли'),
+        ]
+
+        for param, expected, risk, desc in checks:
+            pattern = rf'^\s*{param}\s+{expected}'
+            if re.search(pattern, content, re.MULTILINE | re.IGNORECASE):
+                print_status('good', f'{param}: {expected} ✓')
+                stats.add('services', 'good', f'SSH {param}={expected}',
+                         simple_msg=f'{param}: настроено правильно')
+            else:
+                color = Colors.DANGER if risk == 'critical' else Colors.WARNING
+                print(f"  {color}✗{Colors.RESET} {param}: не задано")
+                stats.add('services', risk, f'SSH {param}',
+                         simple_msg=f'{param}: требует настройки',
+                         simple_fix=f'Добавьте в /etc/ssh/sshd_config: {param} {expected}')
+    except Exception as e:
+        print_status('warning', f'Ошибка: {e}')
+    print()
+
+def package_audit():
+    print_section("ПРОГРАММЫ", "📦")
+    print(f"  {Colors.BOLD}{'Программа':<25} | {'Статус':<15}{Colors.RESET}")
+    print(f"  {Colors.DIM}{'─' * 80}{Colors.RESET}")
+
+    installed = set()
+    for cmd in [['dpkg', '--get-selections'], ['rpm', '-qa']]:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            for line in result.stdout.split('\n'):
+                if line.strip():
+                    installed.add(line.split()[0].lower())
+        except:
+            pass
+
+    for pkg in CONFIG['suspicious_packages']:
+        found = any(pkg in inst for inst in installed)
+        if found:
+            print(f"  {Colors.WARNING}{pkg:<25} | {'УСТАНОВЛЕН':<15}{Colors.RESET}")
+            stats.add('services', 'warning', f'Пакет {pkg} установлен',
+                     simple_msg=f'Установлена программа: {pkg}',
+                     simple_fix=f'Удалите: sudo apt remove {pkg}')
+        else:
+            print(f"  {Colors.DIM}{pkg:<25} | {'НЕ НАЙДЕН':<15}{Colors.RESET}")
+            stats.add('services', 'good', f'Пакет {pkg} не установлен',
+                     simple_msg=f'Программа {pkg} не установлена')
+    print()
+
+# ═══════════════════════════════════════════════════════════════
+# 📊 ИТОГИ
+# ═══════════════════════════════════════════════════════════════
+def print_summary():
+    print_section("ИТОГИ", "📊")
+    s = stats.summary()
+
+    if s['crit'] > 0:
+        grade, score, gcolor = 'D', 40, Colors.DANGER
+    elif s['warn'] > 5:
+        grade, score, gcolor = 'C', 60, Colors.WARNING
+    elif s['warn'] > 0:
+        grade, score, gcolor = 'B', 80, Colors.GOOD
+    else:
+        grade, score, gcolor = 'A', 100, Colors.GOOD
+
+    print(f"""
+{Colors.DIM}┌────────────────────────────────────────────────────────────────────┐{Colors.RESET}
+{Colors.DIM}{Colors.RESET}  {Colors.BOLD}ОЦЕНКА:{Colors.RESET} {gcolor}{grade}{Colors.RESET} ({s['score']}/100)                              {Colors.DIM}{Colors.RESET}
+{Colors.DIM}{Colors.RESET}  {Colors.GOOD}✓{Colors.RESET} {s['passed']:<5}  {Colors.WARNING}⚠{Colors.RESET} {s['warn']:<5}  {Colors.DANGER}✗{Colors.RESET} {s['crit']:<5}                    {Colors.DIM}{Colors.RESET}
+{Colors.DIM}└────────────────────────────────────────────────────────────────────┘{Colors.RESET}
+""")
+
+# ═══════════════════════════════════════════════════════════════
+# 🚀 MAIN
+# ═══════════════════════════════════════════════════════════════
+def main():
+    print_banner()
+    if not check_system():
+        return
+
+    file_audit()
+    network_audit()
+    user_audit()
+    ssh_audit()
+    package_audit()
+
+    print_summary()
+
+    print(f"\n{Colors.INFO}📄 СОХРАНЕНИЕ ОТЧЁТОВ{Colors.RESET}")
+    print(f"{Colors.DIM}{'─' * 80}{Colors.RESET}")
+
+    generate_txt_report(CONFIG['export_txt'])
+    generate_pdf_report(CONFIG['export_pdf'])
+
+    print(f"\n{Colors.GOOD}{'═' * 80}{Colors.RESET}")
+    print(f"{Colors.GOOD}  ✓ Аудит завершён!{Colors.RESET}")
+    print(f"{Colors.GOOD}  📄 Отчёты: {CONFIG['export_txt']}, {CONFIG['export_pdf']}{Colors.RESET}")
+    print(f"{Colors.GOOD}{'═' * 80}{Colors.RESET}\n")
+
+if __name__ == "__main__":
+    try:
+        if os.geteuid() != 0:
+            print(f"{Colors.WARNING}⚠ Рекомендуется запуск с sudo{Colors.RESET}\n")
+        main()
+    except KeyboardInterrupt:
+        print(f"\n\n{Colors.WARNING}⚠ Прервано{Colors.RESET}\n")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\n{Colors.DANGER}✗ Ошибка: {e}{Colors.RESET}\n")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
