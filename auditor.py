@@ -1,62 +1,70 @@
+#!/usr/bin/env python3
 import os
 import socket
 import subprocess
 import platform
 import sys
+from tkinter import *
 
-# Цвета для терминала
-G = '033[92m' # Good
-Y = '033[93m' # Warning
-R = '033[91m' # Danger
-W = '033[0m'  # Reset
+root = Tk()
+root.title("АВТОМАТИЧЕСКИЙ АУДИТОР БЕЗОПАСНОСТИ LINUX")
+root.geometry('700x600')
+
+
+text = Text(root, wrap=WORD, width=80, height=30)
+scroll = Scrollbar(root, command=text.yview)
+text.configure(yscrollcommand=scroll.set)
+
+scroll.pack(side=RIGHT, fill=Y)
+text.pack(side=LEFT, fill=BOTH, expand=True)
+
+def log(msg):
+    text.insert(END, msg + "\n")
+    text.see(END)
+
 
 def check_system():
-    """Проверка, что скрипт запущен в Linux и с правами root"""
-    print(f"[*] Анализ окружения...")
-    
+    text.delete(1.0, END)
+    log("Проверка, что скрипт запущен в Linux и с правами root")
     current_os = platform.system()
     if current_os != "Linux":
-        print(f"{R}[!] ОШИБКА: Скрипт предназначен только для Linux. Ваша система: {current_os}{W}")
-        sys.exit(1)
-    
+        log(f"[!] ОШИБКА: Скрипт предназначен только для Linux. Ваша система: {current_os}")
+        return False
     if os.geteuid() != 0:
-        print(f"{Y}[!] ВНИМАНИЕ: Скрипт запущен БЕЗ прав root. Результаты проверки файлов будут неполными.{W}")
+        log("[!] ВНИМАНИЕ: Скрипт запущен БЕЗ прав root. Результаты проверки файлов будут неполными.")
     else:
-        print(f"{G}[+] Проверка ОС пройдена (Linux). Права администратора подтверждены.{W}")
+        log("[+] Проверка ОС пройдена (Linux). Права администратора подтверждены.")
+    return True
 
-def print_table_header(title):
-    print(f"n{Y}=== {title} ==={W}")
-    print(f"{'-'*105}")
-    print(f"{'Объект/Параметр':<30} | {'Статус':<20} | {'Рекомендация'}")
-    print(f"{'-'*105}")
 
 def file_audit():
-    print_table_header("АНАЛИЗ ПРАВ ДОСТУПА (/etc)")
+    log("\n=== Анализ прав доступа (/etc) ===")
     critical_files = {
         '/etc/passwd': '644',
         '/etc/shadow': '600',
         '/etc/group': '644',
         '/etc/sudoers': '440'
     }
-    
     for file, target_mode in critical_files.items():
         if os.path.exists(file):
             try:
                 mode = oct(os.stat(file).st_mode)[-3:]
-                if mode > target_mode:
-                    status = f"{R}УЯЗВИМО ({mode}){W}"
+                if int(mode) > int(target_mode):
+                    status = f"УЯЗВИМО ({mode})"
                     rec = f"Установите chmod {target_mode}"
                 else:
-                    status = f"{G}OK ({mode}){W}"
+                    status = f"OK ({mode})"
                     rec = "Правки не требуются"
             except PermissionError:
-                status = f"{Y}НЕТ ДОСТУПА{W}"
+                status = "НЕТ ДОСТУПА"
                 rec = "Запустите скрипт через sudo"
-            
-            print(f"{file:<30} | {status:<30} | {rec}")
+            log(f"{file:<30} | {status:<15} | {rec}")
+        else:
+            log(f"{file:<30} | Не найден | -")
+
 
 def network_audit():
-    print_table_header("СЕТЕВОЙ АУДИТ (Localhost)")
+    log("\n=== Сетевой аудит (localhost) ===")
     check_ports = {
         21: "FTP (Небезопасно)",
         22: "SSH (Стандарт)",
@@ -64,51 +72,52 @@ def network_audit():
         80: "HTTP (Нешифрованный)",
         443: "HTTPS (Безопасно)"
     }
-    
     for port, name in check_ports.items():
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(0.2)
         result = s.connect_ex(('127.0.0.1', port))
-        
         if result == 0:
-            status = f"{R}ОТКРЫТ ({name}){W}"
+            status = f"ОТКРЫТ ({name})"
             rec = "Закройте порт или используйте VPN/SSH" if port != 443 else "OK"
         else:
-            status = f"{G}ЗАКРЫТ{W}"
+            status = "ЗАКРЫТ"
             rec = "-"
-            
-        print(f"{f'Порт {port}':<30} | {status:<30} | {rec}")
+        log(f"Порт {port:<5} | {status:<20} | {rec}")
         s.close()
 
+
 def package_audit():
-    print_table_header("АУДИТ ПАКЕТОВ")
+    log("\n=== Аудит пакетов ===")
     suspicious_apps = ['telnet', 'netcat', 'rsh-client', 'wireshark', 'nmap']
-    
     try:
         installed = subprocess.run(['dpkg', '--get-selections'], capture_output=True, text=True).stdout
-        
         for app in suspicious_apps:
             if app in installed:
-                status = f"{Y}УСТАНОВЛЕН{W}"
-                rec = f"Удалить, если не нужен для работы"
+                status = "УСТАНОВЛЕН"
+                rec = "Удалить, если не нужен для работы"
             else:
-                status = f"{G}НЕ НАЙДЕН{W}"
+                status = "НЕ НАЙДЕН"
                 rec = "Рисков нет"
-            print(f"{app:<30} | {status:<30} | {rec}")
+            log(f"{app:<15} | {status:<10} | {rec}")
     except FileNotFoundError:
-        print(f"{R}Ошибка: Утилита dpkg не найдена (это не Debian/Ubuntu/Kali?){W}")
+        log("Ошибка: Утилита dpkg не найдена (это не Debian/Ubuntu/Kali?)")
 
-if __name__ == "__main__":
-    os.system('clear')
-    
-    print(f"{G}╔════════════════════════════════════════════════════════════╗{W}")
-    print(f"{G}║          АВТОМАТИЧЕСКИЙ АУДИТОР БЕЗОПАСНОСТИ LINUX         ║{W}")
-    print(f"{G}╚════════════════════════════════════════════════════════════╝{W}n")
-    
-    check_system()
-    
-    file_audit()
-    network_audit()
-    package_audit()
-    
-    print(f"n{G}[+] Аудит завершен.{W}")
+
+def run_audit():
+    if check_system():
+        file_audit()
+        network_audit()
+        package_audit()
+        log("\n[+] Аудит завершен.")
+
+
+btn_frame = Frame(root)
+btn_frame.pack(pady=10)
+
+btn_check = Button(btn_frame, text="Запустить аудит", command=run_audit)
+btn_check.pack(side=LEFT, padx=5)
+
+btn_clear = Button(btn_frame, text="Очистить", command=lambda: text.delete(1.0, END))
+btn_clear.pack(side=LEFT, padx=5)
+
+root.mainloop()
