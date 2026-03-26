@@ -23,5 +23,7 @@
    `git clone https://github.com/Cherr-Crow/ITBur-CyberAudit-IDK.git`
 2. Перейдите в папку:
    `cd ITBur-CyberAudit-IDK`
-4. Запустите аудит:
-   `python auditor.py`
+3. Скачать и подготовить:
+   `chmod +x install.sh`
+4. Запустить аудит
+   `sudo ./auditor.py`
