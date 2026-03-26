@@ -20,7 +20,7 @@
 
 ### Инструкция по установке и запуску
 1. Клонируйте репозиторий:
-   `git clone https://github.com/ваш-логин/ITBur-CyberAudit-IDK.git`
+   `git clone https://github.com/Cherr-Crow/ITBur-CyberAudit-IDK.git`
 2. Перейдите в папку:
    `cd ITBur-CyberAudit-IDK`
 4. Запустите аудит:
