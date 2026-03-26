@@ -25,5 +25,7 @@
    `cd ITBur-CyberAudit-IDK`
 3. Скачать и подготовить:
    `chmod +x install.sh`
-4. Запустить аудит
+4. Установить всё автоматически:
+   `./install.sh`
+5. Запустить аудит
    `sudo ./auditor.py`
