@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 🛡️ Автоматический аудитор безопасности Linux (GUI версия)
-Версия: 3.2.4 (Оценка 0 до аудита + защита от пустого сохранения)
+Версия: 3.2.5 (Сохранение с 0/100 + предупреждение в отчёте)
 """
 import os
 import re
@@ -117,7 +117,7 @@ audit_timestamp = None   # Время последнего аудита
 # 🖥️ GUI ПРИЛОЖЕНИЕ
 # ═══════════════════════════════════════════════════════════════
 root = Tk()
-root.title("🛡️ АВТОМАТИЧЕСКИЙ АУДИТОР БЕЗОПАСНОСТИ LINUX v3.2.4")
+root.title("🛡️ АВТОМАТИЧЕСКИЙ АУДИТОР БЕЗОПАСНОСТИ LINUX v3.2.5")
 root.geometry('1100x800')
 root.configure(bg='#1a1a1a')
 
@@ -209,7 +209,7 @@ def create_stats_labels():
 
     Label(stats_frame, text="📈 ОЦЕНКА БЕЗОПАСНОСТИ:", bg='#1a1a1a', fg='#00ff00',
           font=('Arial', 10, 'bold')).grid(row=2, column=0, sticky='w', padx=5)
-    Label(stats_frame, textvariable=security_score, bg='#1a1a1a', fg='#ff0000',  # ✅ КРАСНЫЙ ДО АУДИТА
+    Label(stats_frame, textvariable=security_score, bg='#1a1a1a', fg='#ff0000',
           font=('Consolas', 14, 'bold')).grid(row=2, column=1, sticky='w', padx=5)
 
     Label(stats_frame, text="⏱ ВРЕМЯ ПРОВЕРКИ:", bg='#1a1a1a', fg='#00ff00',
@@ -218,25 +218,18 @@ def create_stats_labels():
           font=('Consolas', 12, 'bold')).grid(row=2, column=3, sticky='w', padx=5)
 
 # ═══════════════════════════════════════════════════════════════
-# 🛡️ ПРОВЕРКА: БЫЛ ЛИ ПРОВЕДЁН АУДИТ
+# ⚠️ ПРОВЕРКА: БЫЛ ЛИ ПРОВЕДЁН АУДИТ (✅ ИЗМЕНЕНО)
 # ═══════════════════════════════════════════════════════════════
 def check_audit_completed():
-    """✅ Проверяет, был ли проведён аудит перед сохранением"""
+    """
+    ✅ ТЕПЕРЬ НЕ БЛОКИРУЕТ СОХРАНЕНИЕ
+    Просто возвращает статус для записи в отчёт
+    """
     global audit_completed
     if not audit_completed:
-        messagebox.showerror(
-            "❌ АУДИТ НЕ ПРОВЕДЁН",
-            "⚠️ ОШИБКА: Сохранение невозможно!\n\n"
-            "📋 Аудит безопасности ещё не был проведён.\n\n"
-            "💡 ЧТО НУЖНО СДЕЛАТЬ:\n"
-            "1. Нажмите кнопку «🚀 ЗАПУСТИТЬ АУДИТ»\n"
-            "2. Дождитесь завершения проверки\n"
-            "3. После этого вы получите оценку безопасности\n"
-            "4. Затем можно сохранить отчёт\n\n"
-            "📊 Без аудита оценка будет: 0/100"
-        )
-        log("\n⚠️ Попытка сохранения без аудита! Сначала проведите проверку.", '#ffff00')
-        log("   💡 Нажмите «🚀 ЗАПУСТИТЬ АУДИТ» для получения оценки безопасности", '#ffff00')
+        log("\n⚠️ ВНИМАНИЕ: Аудит не был проведён!", '#ffff00')
+        log("   📄 Отчёт будет сохранён с оценкой 0/100", '#ffff00')
+        log("   💡 Запустите аудит для получения реальной оценки", '#ffff00')
         return False
     return True
 
@@ -245,8 +238,7 @@ def check_audit_completed():
 # ═══════════════════════════════════════════════════════════════
 def generate_pdf_report():
     """✅ Создаёт PDF с поддержкой кириллицы"""
-    if not check_audit_completed():
-        return False
+    audit_was_completed = check_audit_completed()
 
     try:
         from reportlab.lib import colors
@@ -311,6 +303,12 @@ def generate_pdf_report():
                                        fontName=font_name, fontSize=11,
                                        textColor=colors.green, spaceAfter=6, leading=14)
 
+        # ✅ СТИЛЬ ДЛЯ ПРЕДУПРЕЖДЕНИЯ ОБ ОТСУТСТВИИ АУДИТА
+        audit_warning_style = ParagraphStyle('AuditWarning', parent=styles['Normal'],
+                                             fontName=font_name, fontSize=12,
+                                             textColor=colors.red, spaceAfter=12,
+                                             leading=16, alignment=TA_CENTER)
+
         story = []
         s = stats.summary()
 
@@ -320,16 +318,26 @@ def generate_pdf_report():
         story.append(Paragraph(f"OS: {platform.system()} {platform.release()}", normal_style))
         story.append(Spacer(1, 0.3*inch))
 
+        # ✅ ПРЕДУПРЕЖДЕНИЕ ЕСЛИ АУДИТ НЕ ПРОВЕДЁН
+        if not audit_was_completed:
+            story.append(Paragraph("⚠️ ВНИМАНИЕ: АУДИТ БЕЗОПАСНОСТИ НЕ БЫЛ ПРОВЕДЁН!", audit_warning_style))
+            story.append(Paragraph("Данный отчёт сохранён без проведения проверки безопасности.", normal_style))
+            story.append(Paragraph("Оценка 0/100 указывает на отсутствие данных аудита.", normal_style))
+            story.append(Paragraph("💡 Для получения реальной оценки запустите полную проверку.", normal_style))
+            story.append(Spacer(1, 0.3*inch))
+
         grade = 'A' if s['score'] >= 90 else 'B' if s['score'] >= 75 else 'C' if s['score'] >= 60 else 'D' if s['score'] >= 40 else 'F'
         story.append(Paragraph(f"ОБЩАЯ ОЦЕНКА: {grade} ({s['score']} из 100)", heading_style))
 
-        if s['score'] >= 80:
-            explanation = "Хорошо! Ваш компьютер хорошо защищён."
-        elif s['score'] >= 60:
-            explanation = "Нормально. Есть несколько моментов для улучшения."
-        else:
-            explanation = "Внимание! Обнаружены серьёзные проблемы."
-        story.append(Paragraph(explanation, normal_style))
+        if audit_was_completed:
+            if s['score'] >= 80:
+                explanation = "Хорошо! Ваш компьютер хорошо защищён."
+            elif s['score'] >= 60:
+                explanation = "Нормально. Есть несколько моментов для улучшения."
+            else:
+                explanation = "Внимание! Обнаружены серьёзные проблемы."
+            story.append(Paragraph(explanation, normal_style))
+
         story.append(Spacer(1, 0.2*inch))
 
         stat_data = [
@@ -407,8 +415,7 @@ def generate_pdf_report():
 # ═══════════════════════════════════════════════════════════════
 def generate_txt_report():
     """✅ Создаёт TXT-отчёт с кириллицей"""
-    if not check_audit_completed():
-        return False
+    audit_was_completed = check_audit_completed()
 
     try:
         s = stats.summary()
@@ -421,14 +428,27 @@ def generate_txt_report():
             f.write(f"Компьютер: {socket.gethostname()}\n")
             f.write(f"ОС: {platform.system()} {platform.release()}\n")
             f.write("-" * 80 + "\n")
+
+            # ✅ ПРЕДУПРЕЖДЕНИЕ ЕСЛИ АУДИТ НЕ ПРОВЕДЁН
+            if not audit_was_completed:
+                f.write("⚠️ ВНИМАНИЕ: АУДИТ БЕЗОПАСНОСТИ НЕ БЫЛ ПРОВЕДЁН!\n")
+                f.write("-" * 80 + "\n")
+                f.write("Данный отчёт сохранён без проведения проверки безопасности.\n")
+                f.write("Оценка 0/100 указывает на отсутствие данных аудита.\n")
+                f.write("💡 Для получения реальной оценки запустите полную проверку.\n")
+                f.write("-" * 80 + "\n\n")
+
             f.write(f"ОБЩАЯ ОЦЕНКА: {grade} ({s['score']} из 100)\n")
             f.write("-" * 80 + "\n")
-            if s['score'] >= 80:
-                f.write("✅ ХОРОШО! Ваш компьютер хорошо защищён.\n")
-            elif s['score'] >= 60:
-                f.write("⚠ НОРМАЛЬНО. Есть несколько моментов для улучшения.\n")
-            else:
-                f.write("🔴 ВНИМАНИЕ! Обнаружены серьёзные проблемы.\n")
+
+            if audit_was_completed:
+                if s['score'] >= 80:
+                    f.write("✅ ХОРОШО! Ваш компьютер хорошо защищён.\n")
+                elif s['score'] >= 60:
+                    f.write("⚠ НОРМАЛЬНО. Есть несколько моментов для улучшения.\n")
+                else:
+                    f.write("🔴 ВНИМАНИЕ! Обнаружены серьёзные проблемы.\n")
+
             f.write("СТАТИСТИКА:\n")
             f.write(f"  ✅ Всё в порядке: {s['passed']}\n")
             f.write(f"  ⚠ Требует внимания: {s['warn']}\n")
@@ -474,9 +494,6 @@ def generate_txt_report():
 
 def save_reports():
     """Сохранение обоих отчётов"""
-    if not check_audit_completed():
-        return
-
     log("\n" + "="*70, '#00ffff')
     log("📄 СОХРАНЕНИЕ ОТЧЁТОВ", '#00ffff')
     log("="*70, '#00ffff')
@@ -737,32 +754,34 @@ def print_summary():
 def run_audit():
     """Запуск полного аудита"""
     global audit_completed, audit_timestamp
-    audit_completed = True
 
     clear_log()
     stats.__init__()
     log("="*70, '#00ffff')
     log("🛡️  АВТОМАТИЧЕСКИЙ АУДИТОР БЕЗОПАСНОСТИ LINUX", '#00ffff')
-    log(f"  Версия: 3.2.4 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", '#ffffff')
+    log(f"  Версия: 3.2.5 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", '#ffffff')
     log("="*70, '#00ffff')
     if not check_system():
         log("\n🔴 Аудит прерван: неподдерживаемая ОС", '#ff0000')
         return
+
     file_audit()
     network_audit()
     user_audit()
     ssh_audit()
     package_audit()
     print_summary()
-    save_reports()
+
+    # ✅ УСТАНАВЛИВАЕМ ФЛАГ ПЕРЕД СОХРАНЕНИЕМ!
+    audit_completed = True
+    audit_timestamp = datetime.now()
+
+    save_reports()  # ← Теперь сохранение знает что аудит проведён
+
     log("\n" + "="*70, '#00ff00')
     log("  ✅ АУДИТ ЗАВЕРШЁН!", '#00ff00')
     log(f"  📄 Отчёты: {CONFIG['export_txt']}, {CONFIG['export_pdf']}", '#00ff00')
     log("="*70, '#00ff00')
-
-    # ✅ УСТАНАВЛИВАЕМ ФЛАГ: аудит проведён
-    audit_completed = True
-    audit_timestamp = datetime.now()
     log(f"\n✅ Аудит завершён в {audit_timestamp.strftime('%H:%M:%S')}", '#00ff00')
 
 # ═══════════════════════════════════════════════════════════════
